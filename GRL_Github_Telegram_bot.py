@@ -21,7 +21,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def procesar_datos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     texto = update.message.text.strip().lower().replace(",", ".")
-
+    
     try:
         if estado.get(user_id) == "precio_entrada":
             datos[user_id] = {"tipo_operacion": "long", "precio_entrada": float(texto)}
@@ -41,6 +41,13 @@ async def procesar_datos(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Dime la cantidad de niveles de recompra.")
         elif estado.get(user_id) == "niveles_recompra":
             datos[user_id]["niveles_recompra"] = int(texto)
+            estado[user_id] = "porcentaje_recompra"
+            await update.message.reply_text(
+                "Dime el porcentaje de diferencia entre los niveles de recompra.\n"
+                "Si prefieres la distribución predeterminada, escribe `0`."
+            )
+        elif estado.get(user_id) == "porcentaje_recompra":
+            datos[user_id]["porcentaje_recompra"] = float(texto)
             estado[user_id] = "niveles_take_profit"
             await update.message.reply_text("Dime la cantidad de niveles de take profit.")
         elif estado.get(user_id) == "niveles_take_profit":
@@ -58,15 +65,16 @@ async def procesar_datos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text("Ocurrió un error inesperado. Por favor, inténtalo de nuevo más tarde.")
 
+# Modificación en el cálculo de niveles de recompra
 async def calcular_resultados(update: Update, datos: dict):
     try:
         # Datos ingresados
-        tipo_operacion = datos["tipo_operacion"]
         precio_entrada = datos["precio_entrada"]
         capital_total = datos["capital_total"]
         porcentaje_riesgo = datos["porcentaje_riesgo"]
         porcentaje_stop_loss = datos["porcentaje_stop_loss"]
         niveles_recompra = datos["niveles_recompra"]
+        porcentaje_recompra = datos["porcentaje_recompra"]  # Nuevo
         niveles_take_profit = datos["niveles_take_profit"]
         porcentaje_take_profit = datos["porcentaje_take_profit"]
 
@@ -78,24 +86,31 @@ async def calcular_resultados(update: Update, datos: dict):
         # Riesgo Máximo Permitido
         riesgo_maximo = capital_total * (porcentaje_riesgo / 100)
 
+        # Distribuir riesgo entre la entrada inicial y las recompras
+        riesgo_por_nivel = round(riesgo_maximo / (niveles_recompra + 1), 6)
+
         # Tokens iniciales
         diferencia_stop_loss = abs(precio_entrada - stop_loss_global)
-        tokens_iniciales = round(riesgo_maximo / diferencia_stop_loss, 6)
+        tokens_iniciales = round(riesgo_por_nivel / diferencia_stop_loss, 6)
 
-        # Niveles de Recompra
-        riesgo_por_nivel = riesgo_maximo / (niveles_recompra + 1)
-        primer_nivel_recompra = precio_entrada * 0.985  # 1.5% por debajo del precio de entrada
-        ultimo_nivel_recompra = stop_loss_global * 1.0075  # 0.75% por encima del stop loss global
-        precios_recompra = [
-            round(primer_nivel_recompra - i * (primer_nivel_recompra - ultimo_nivel_recompra) / (niveles_recompra - 1), 6)
-            for i in range(niveles_recompra)
-        ]
+        # Distribución de niveles de recompra
+        if porcentaje_recompra > 0:  # Opción personalizada
+            precios_recompra = [
+                round(precio_entrada * (1 - (porcentaje_recompra / 100) * i), 6)
+                for i in range(1, niveles_recompra + 1)
+            ]
+        else:  # Distribución predeterminada
+            primer_nivel_recompra = precio_entrada * 0.985  # 1.5% por debajo de la entrada
+            ultimo_nivel_recompra = stop_loss_global * 1.0075  # 0.75% por encima del stop loss global
+            precios_recompra = [
+                round(primer_nivel_recompra - i * (primer_nivel_recompra - ultimo_nivel_recompra) / (niveles_recompra - 1), 6)
+                for i in range(niveles_recompra)
+            ]
+        
         tokens_recompra = [
-            round(riesgo_por_nivel / abs(precio - stop_loss_global), 6) for precio in precios_recompra
+            round(riesgo_por_nivel / abs(precio - stop_loss_global), 6) 
+            for precio in precios_recompra
         ]
-
-        # Aseguramos consistencia con tokens iniciales
-        tokens_iniciales_correctos = round(riesgo_por_nivel / diferencia_stop_loss, 6)
 
         # Niveles de Take Profit
         precios_take_profit = [
@@ -103,7 +118,7 @@ async def calcular_resultados(update: Update, datos: dict):
             for i in range(1, niveles_take_profit + 1)
         ]
         tokens_take_profit = [
-            round(tokens_iniciales_correctos * i / sum(range(1, niveles_take_profit + 1)), 6)
+            round(tokens_iniciales * i / sum(range(1, niveles_take_profit + 1)), 6)
             for i in range(1, niveles_take_profit + 1)
         ]
 
@@ -115,7 +130,7 @@ async def calcular_resultados(update: Update, datos: dict):
         for clave, valor in datos.items():
             resultados += f"- {clave.capitalize().replace('_', ' ')}: {valor}\n"
         resultados += f"\n*Riesgo Máximo Permitido:* {riesgo_maximo:.2f} USD\n"
-        resultados += f"*Cantidad Inicial de Tokens:* {tokens_iniciales_correctos}\n"
+        resultados += f"*Cantidad Inicial de Tokens:* {tokens_iniciales}\n"
         resultados += f"\n*Stop Loss Global:* {stop_loss_global}\n\n"
         resultados += "*Niveles de Recompra:*\n"
         for i, (precio, tokens) in enumerate(zip(precios_recompra, tokens_recompra)):
